@@ -170,7 +170,7 @@ def show_reviewer() -> None:
 
     st.caption(
         "The query is analyzed statically. "
-        "It is not executed against the database."
+        "Only safe SELECT queries can be sent to PostgreSQL EXPLAIN."
     )
 
     sql = st.text_area(
@@ -188,6 +188,11 @@ def show_reviewer() -> None:
         value=True,
     )
 
+    include_explain = st.checkbox(
+        "Generate PostgreSQL EXPLAIN plan",
+        value=True,
+    )
+
     analyze_clicked = st.button(
         "Analyze SQL",
         type="primary",
@@ -202,28 +207,34 @@ def show_reviewer() -> None:
         return
 
     try:
-        with st.spinner(
-            "Analyzing SQL..."
-            if not include_ai
-            else "Analyzing SQL and generating AI review..."
-        ):
-            result = analyze_sql(
-                sql,
-                include_ai=include_ai,
-            )
+        with st.spinner("Analyzing SQL..."):
 
-            db = SessionLocal()
+            # Отдельная сессия для EXPLAIN.
+            analysis_db = SessionLocal()
+
+            try:
+                result = analyze_sql(
+                    sql,
+                    include_ai=include_ai,
+                    include_explain=include_explain,
+                    db=analysis_db,
+                )
+            finally:
+                analysis_db.close()
+
+            # Отдельная сессия для сохранения истории.
+            history_db = SessionLocal()
 
             try:
                 save_review(
-                    db=db,
+                    db=history_db,
                     user_id=st.session_state.user_id,
                     sql_query=sql,
                     score=result["score"],
                     review_text=result["ai_review"],
                 )
             finally:
-                db.close()
+                history_db.close()
 
     except Exception as exc:
         st.error(
@@ -270,6 +281,28 @@ def show_reviewer() -> None:
 
     st.divider()
 
+    # PostgreSQL EXPLAIN
+    st.subheader("PostgreSQL EXPLAIN")
+
+    explain_result = result["explain"]
+
+    if explain_result is None:
+        st.info("EXPLAIN was not requested.")
+
+    elif explain_result["available"]:
+        st.code(
+            "\n".join(explain_result["plan"]),
+            language="text",
+        )
+
+    else:
+        st.info(
+            explain_result["reason"]
+        )
+
+    st.divider()
+
+    # Ollama
     st.subheader("AI Review")
 
     if result["ai_review"]:
