@@ -4,6 +4,10 @@ from reviewer.ai_reviewer import get_ai_review
 from reviewer.explain import explain_query
 from reviewer.linter import lint_sql
 from reviewer.rules import run_custom_rules
+from reviewer.scoring import (
+    calculate_overall_score,
+    calculate_quality_score,
+)
 
 
 def analyze_sql(
@@ -13,22 +17,63 @@ def analyze_sql(
     db: Session | None = None,
 ) -> dict:
     """
-    Run SQL review.
+    Выполняет полный анализ SQL-запроса.
 
-    Includes:
-    - custom deterministic rules
-    - SQLFluff static analysis
-    - optional PostgreSQL EXPLAIN
-    - optional Ollama AI review
+    Оценка рисков:
+        формируется нашими детерминированными правилами.
+
+    Оценка качества:
+        формируется на основе SQLFluff.
+
+    Итоговая оценка:
+        60% риски + 40% качество SQL.
     """
 
-    custom_result = run_custom_rules(sql)
-    sqlfluff_findings = lint_sql(sql)
+    custom_result = run_custom_rules(
+        sql
+    )
+
+    raw_sqlfluff_findings = lint_sql(
+        sql
+    )
+
+    quality_result = calculate_quality_score(
+        raw_sqlfluff_findings
+    )
+
+    risk_score = custom_result["score"]
+
+    quality_score = quality_result["score"]
+
+    sqlfluff_findings = quality_result[
+        "findings"
+    ]
+
+    overall_score = calculate_overall_score(
+        risk_score=risk_score,
+        quality_score=quality_score,
+        custom_findings=custom_result["findings"],
+        sqlfluff_findings=sqlfluff_findings,
+    )
 
     result = {
-        "score": custom_result["score"],
-        "custom_findings": custom_result["findings"],
+        # Три независимых показателя.
+        "risk_score": risk_score,
+        "quality_score": quality_score,
+        "overall_score": overall_score,
+
+        # Округлённая итоговая оценка используется
+        # для текущего поля score в PostgreSQL.
+        "score": int(
+            round(overall_score)
+        ),
+
+        "custom_findings": custom_result[
+            "findings"
+        ],
+
         "sqlfluff_findings": sqlfluff_findings,
+
         "explain": None,
         "ai_review": None,
     }
@@ -37,9 +82,13 @@ def analyze_sql(
         if db is None:
             result["explain"] = {
                 "available": False,
-                "reason": "Database session was not provided.",
+                "reason": (
+                    "Для выполнения EXPLAIN не была "
+                    "передана сессия базы данных."
+                ),
                 "plan": [],
             }
+
         else:
             result["explain"] = explain_query(
                 db=db,
@@ -49,8 +98,15 @@ def analyze_sql(
     if include_ai:
         result["ai_review"] = get_ai_review(
             sql=sql,
-            custom_findings=custom_result["findings"],
-            sqlfluff_findings=sqlfluff_findings,
+            custom_findings=result[
+                "custom_findings"
+            ],
+            sqlfluff_findings=result[
+                "sqlfluff_findings"
+            ],
+            risk_score=risk_score,
+            quality_score=quality_score,
+            overall_score=overall_score,
         )
 
     return result

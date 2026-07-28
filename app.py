@@ -2,8 +2,8 @@ import streamlit as st
 
 from auth.auth import authenticate_user, register_user
 from database.db import SessionLocal
-from reviewer.analyzer import analyze_sql
 from database.reviews import get_user_reviews, save_review
+from reviewer.analyzer import analyze_sql
 
 
 st.set_page_config(
@@ -11,6 +11,58 @@ st.set_page_config(
     page_icon="🔍",
     layout="wide",
 )
+
+
+# Скрываем стандартный индикатор выполнения Streamlit
+# в правом верхнем углу.
+st.markdown(
+    """
+    <style>
+    div[data-testid="stStatusWidget"] {
+        display: none !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+SQLFLUFF_RUSSIAN_DESCRIPTIONS = {
+    "LT01": (
+        "Нарушено рекомендуемое форматирование пробелов."
+    ),
+    "LT09": (
+        "При выборе нескольких столбцов SQLFluff рекомендует "
+        "размещать их на отдельных строках."
+    ),
+    "LT12": (
+        "SQLFluff ожидает один перенос строки в конце SQL."
+    ),
+    "LT13": (
+        "SQL не должен начинаться с пустой строки "
+        "или лишних пробелов."
+    ),
+    "AL01": (
+        "Стиль использования псевдонимов таблиц "
+        "не соответствует выбранному правилу SQLFluff."
+    ),
+    "AM04": (
+        "Запрос возвращает неопределённое количество столбцов. "
+        "Это характерно, например, для SELECT *."
+    ),
+    "AM05": (
+        "SQLFluff обнаружил неоднозначность в оформлении JOIN. "
+        "Рекомендуется явно указать тип соединения."
+    ),
+    "ST09": (
+        "SQLFluff рекомендует изменить порядок ссылок "
+        "на таблицы в условии JOIN для единообразия структуры SQL."
+    ),
+    "PRS": (
+        "SQLFluff не смог корректно разобрать запрос. "
+        "Вероятна синтаксическая ошибка."
+    ),
+}
 
 
 def init_session_state() -> None:
@@ -23,8 +75,10 @@ def init_session_state() -> None:
 
 def show_login() -> None:
     st.title("AI SQL Reviewer")
+
     st.caption(
-        "Static analysis, SQLFluff and local AI-assisted PostgreSQL review."
+        "Анализ PostgreSQL-запросов с помощью "
+        "детерминированных правил, SQLFluff и локальной AI-модели."
     )
 
     login_tab, register_tab = st.tabs(
@@ -35,7 +89,10 @@ def show_login() -> None:
         st.subheader("Login")
 
         with st.form("login_form"):
-            username = st.text_input("Username")
+            username = st.text_input(
+                "Username"
+            )
+
             password = st.text_input(
                 "Password",
                 type="password",
@@ -57,7 +114,9 @@ def show_login() -> None:
                 )
 
                 if user is None:
-                    st.error("Invalid username or password.")
+                    st.error(
+                        "Invalid username or password."
+                    )
                 else:
                     st.session_state.user_id = user.id
                     st.session_state.username = user.username
@@ -93,7 +152,9 @@ def show_login() -> None:
 
         if submitted:
             if password != confirm_password:
-                st.error("Passwords do not match.")
+                st.error(
+                    "Passwords do not match."
+                )
                 return
 
             db = SessionLocal()
@@ -111,70 +172,202 @@ def show_login() -> None:
                 )
 
             except ValueError as exc:
-                st.error(str(exc))
+                st.error(
+                    str(exc)
+                )
 
             finally:
                 db.close()
 
 
-def render_custom_findings(findings: list[dict]) -> None:
-    st.subheader("Custom Rules")
+def severity_name(
+    severity: str,
+) -> str:
+    translations = {
+        "CRITICAL": "КРИТИЧЕСКОЕ",
+        "WARNING": "ПРЕДУПРЕЖДЕНИЕ",
+        "INFO": "ИНФОРМАЦИЯ",
+    }
+
+    return translations.get(
+        severity,
+        severity,
+    )
+
+
+def translate_sqlfluff(
+    finding: dict,
+) -> str:
+    code = finding.get(
+        "code",
+        "UNKNOWN",
+    )
+
+    return SQLFLUFF_RUSSIAN_DESCRIPTIONS.get(
+        code,
+        (
+            f"SQLFluff обнаружил нарушение правила {code}. "
+            "Проверьте структуру, однозначность и оформление SQL."
+        ),
+    )
+
+
+def render_custom_findings(
+    findings: list[dict],
+) -> None:
+    st.subheader(
+        "Наши правила"
+    )
 
     if not findings:
-        st.success("No custom rule violations found.")
+        st.success(
+            "Нарушений наших правил не обнаружено."
+        )
         return
 
     for finding in findings:
         severity = finding["severity"]
 
         text = (
-            f'**{severity} — {finding["code"]}**\n\n'
-            f'{finding["title"]}\n\n'
+            f'**{severity_name(severity)} — '
+            f'{finding["code"]}**\n\n'
+            f'**{finding["title"]}**\n\n'
             f'{finding["message"]}\n\n'
-            f'Penalty: -{finding["penalty"]}'
+            f'Штраф к оценке рисков: -{finding["penalty"]}'
         )
 
         if severity == "CRITICAL":
-            st.error(text)
+            st.error(
+                text
+            )
+
         elif severity == "WARNING":
-            st.warning(text)
+            st.warning(
+                text
+            )
+
         else:
-            st.info(text)
+            st.info(
+                text
+            )
 
 
-def render_sqlfluff_findings(findings: list[dict]) -> None:
-    st.subheader("SQLFluff")
+def render_sqlfluff_findings(
+    findings: list[dict],
+) -> None:
+    st.subheader(
+        "SQLFluff"
+    )
 
     if not findings:
-        st.success("No SQLFluff violations found.")
+        st.success(
+            "Нарушений SQLFluff не обнаружено."
+        )
         return
 
     for finding in findings:
-        code = finding.get("code", "UNKNOWN")
-        line = finding.get("line")
-        position = finding.get("position")
-        description = finding.get(
-            "description",
-            "No description.",
+        code = finding.get(
+            "code",
+            "UNKNOWN",
+        )
+
+        line = finding.get(
+            "line"
+        )
+
+        position = finding.get(
+            "position"
+        )
+
+        description = translate_sqlfluff(
+            finding
+        )
+
+        penalty = finding.get(
+            "quality_penalty",
+            0,
         )
 
         st.warning(
             f"**{code}** — "
-            f"line {line}, position {position}\n\n"
-            f"{description}"
+            f"строка {line}, позиция {position}\n\n"
+            f"{description}\n\n"
+            f"Влияние на оценку качества: **-{penalty}**"
         )
 
 
-def show_reviewer() -> None:
-    st.subheader("Review SQL")
+def show_scores(
+    result: dict,
+) -> None:
+    risk_score = result[
+        "risk_score"
+    ]
+
+    quality_score = result[
+        "quality_score"
+    ]
+
+    overall_score = result[
+        "overall_score"
+    ]
+
+    col1, col2, col3 = st.columns(
+        3
+    )
+
+    col1.metric(
+        "Оценка рисков",
+        f"{risk_score}/10",
+    )
+
+    col2.metric(
+        "Качество SQL",
+        f"{quality_score}/10",
+    )
+
+    col3.metric(
+        "Итоговая оценка",
+        f"{overall_score}/10",
+    )
+
+    st.progress(
+        overall_score / 10
+    )
+
+    left, right = st.columns(
+        2
+    )
+
+    left.caption(
+        "Наши правила: "
+        f"{len(result['custom_findings'])} нарушений"
+    )
+
+    right.caption(
+        "SQLFluff: "
+        f"{len(result['sqlfluff_findings'])} нарушений"
+    )
 
     st.caption(
-        "The query is analyzed statically. "
-        "Only safe SELECT queries can be sent to PostgreSQL EXPLAIN."
+        "Итоговая оценка: 60% оценки рисков + 40% качества SQL. "
+        "Критические нарушения и ошибки синтаксического разбора "
+        "дополнительно ограничивают итоговую оценку."
+    )
+
+
+def show_reviewer() -> None:
+    st.subheader(
+        "Проверка SQL"
+    )
+
+    st.caption(
+        "Наши правила оценивают риски, SQLFluff — качество SQL. "
+        "PostgreSQL EXPLAIN доступен дополнительно для SELECT-запросов "
+        "к подключённой базе данных."
     )
 
     sql = st.text_area(
-        "PostgreSQL query",
+        "PostgreSQL-запрос",
         height=250,
         placeholder=(
             "SELECT *\n"
@@ -184,17 +377,22 @@ def show_reviewer() -> None:
     )
 
     include_ai = st.checkbox(
-        "Generate AI review with Ollama",
+        "Выполнить AI-разбор с помощью Ollama",
         value=True,
     )
 
     include_explain = st.checkbox(
-        "Generate PostgreSQL EXPLAIN plan",
-        value=True,
+        "Получить план PostgreSQL EXPLAIN",
+        value=False,
+        help=(
+            "EXPLAIN работает только для одиночного SELECT "
+            "и только если используемые таблицы существуют "
+            "в подключённой PostgreSQL."
+        ),
     )
 
     analyze_clicked = st.button(
-        "Analyze SQL",
+        "Проверить SQL",
         type="primary",
         use_container_width=True,
     )
@@ -203,71 +401,57 @@ def show_reviewer() -> None:
         return
 
     if not sql.strip():
-        st.error("Enter a SQL query first.")
+        st.error(
+            "Введите SQL-запрос."
+        )
         return
 
     try:
-        with st.spinner("Analyzing SQL..."):
+        analysis_db = SessionLocal()
 
-            # Отдельная сессия для EXPLAIN.
-            analysis_db = SessionLocal()
+        try:
+            result = analyze_sql(
+                sql,
+                include_ai=include_ai,
+                include_explain=include_explain,
+                db=analysis_db,
+            )
 
-            try:
-                result = analyze_sql(
-                    sql,
-                    include_ai=include_ai,
-                    include_explain=include_explain,
-                    db=analysis_db,
-                )
-            finally:
-                analysis_db.close()
+        finally:
+            analysis_db.close()
 
-            # Отдельная сессия для сохранения истории.
-            history_db = SessionLocal()
+        history_db = SessionLocal()
 
-            try:
-                save_review(
-                    db=history_db,
-                    user_id=st.session_state.user_id,
-                    sql_query=sql,
-                    score=result["score"],
-                    review_text=result["ai_review"],
-                )
-            finally:
-                history_db.close()
+        try:
+            save_review(
+                db=history_db,
+                user_id=st.session_state.user_id,
+                sql_query=sql,
+                score=result["score"],
+                review_text=result["ai_review"],
+            )
+
+        finally:
+            history_db.close()
 
     except Exception as exc:
         st.error(
-            f"Analysis failed: {exc}"
+            "Не удалось выполнить анализ SQL. "
+            f"Техническая причина: {exc}"
         )
         return
 
     st.divider()
 
-    score = result["score"]
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric(
-        "Score",
-        f"{score}/10",
+    show_scores(
+        result
     )
-
-    col2.metric(
-        "Custom findings",
-        len(result["custom_findings"]),
-    )
-
-    col3.metric(
-        "SQLFluff findings",
-        len(result["sqlfluff_findings"]),
-    )
-
-    st.progress(score / 10)
 
     st.divider()
 
-    left_column, right_column = st.columns(2)
+    left_column, right_column = st.columns(
+        2
+    )
 
     with left_column:
         render_custom_findings(
@@ -281,17 +465,30 @@ def show_reviewer() -> None:
 
     st.divider()
 
-    # PostgreSQL EXPLAIN
-    st.subheader("PostgreSQL EXPLAIN")
+    st.subheader(
+        "План выполнения PostgreSQL"
+    )
 
-    explain_result = result["explain"]
+    explain_result = result[
+        "explain"
+    ]
 
     if explain_result is None:
-        st.info("EXPLAIN was not requested.")
+        st.info(
+            "EXPLAIN не запрашивался."
+        )
 
     elif explain_result["available"]:
+        st.caption(
+            "План сформирован PostgreSQL. "
+            "EXPLAIN ANALYZE не используется, "
+            "поэтому сам SELECT не выполняется."
+        )
+
         st.code(
-            "\n".join(explain_result["plan"]),
+            "\n".join(
+                explain_result["plan"]
+            ),
             language="text",
         )
 
@@ -302,18 +499,29 @@ def show_reviewer() -> None:
 
     st.divider()
 
-    # Ollama
-    st.subheader("AI Review")
+    st.subheader(
+        "AI-разбор"
+    )
 
     if result["ai_review"]:
-        st.markdown(result["ai_review"])
-    else:
-        st.info(
-            "AI review was not requested."
+        st.markdown(
+            result["ai_review"]
         )
 
+    else:
+        st.info(
+            "AI-разбор не запрашивался."
+        )
+
+
 def show_history() -> None:
-    st.subheader("Review History")
+    st.subheader(
+        "История проверок"
+    )
+
+    st.caption(
+        "В истории хранится округлённая итоговая оценка."
+    )
 
     db = SessionLocal()
 
@@ -324,39 +532,56 @@ def show_history() -> None:
         )
 
         if not reviews:
-            st.info("No reviews yet.")
+            st.info(
+                "История проверок пока пуста."
+            )
             return
 
         for review in reviews:
             created_at = (
-                review.created_at.strftime("%Y-%m-%d %H:%M")
+                review.created_at.strftime(
+                    "%Y-%m-%d %H:%M"
+                )
                 if review.created_at
-                else "Unknown time"
+                else "Время неизвестно"
             )
 
             title = (
-                f"Review #{review.id} — "
+                f"Проверка #{review.id} — "
                 f"{review.score}/10 — "
                 f"{created_at}"
             )
 
-            with st.expander(title):
+            with st.expander(
+                title
+            ):
+                st.markdown(
+                    "**SQL-запрос**"
+                )
+
                 st.code(
                     review.sql_query,
                     language="sql",
                 )
 
                 st.metric(
-                    "Score",
+                    "Итоговая оценка",
                     f"{review.score}/10",
                 )
 
                 if review.review_text:
-                    st.markdown("### AI Review")
-                    st.markdown(review.review_text)
+                    st.markdown(
+                        "### AI-разбор"
+                    )
+
+                    st.markdown(
+                        review.review_text
+                    )
+
                 else:
                     st.caption(
-                        "AI review was not requested."
+                        "AI-разбор для этой проверки "
+                        "не запрашивался."
                     )
 
     finally:
@@ -365,16 +590,19 @@ def show_history() -> None:
 
 def show_app() -> None:
     with st.sidebar:
-        st.title("AI SQL Reviewer")
+        st.title(
+            "AI SQL Reviewer"
+        )
 
         st.write(
-            f"Logged in as **{st.session_state.username}**"
+            f"Logged in as "
+            f"**{st.session_state.username}**"
         )
 
         st.divider()
 
         st.caption(
-            "Custom Rules + SQLFluff + Ollama"
+            "Rules + SQLFluff + PostgreSQL + Ollama"
         )
 
         if st.button(
@@ -385,15 +613,20 @@ def show_app() -> None:
             st.session_state.username = None
             st.rerun()
 
-    st.title("AI SQL Reviewer")
+    st.title(
+        "AI SQL Reviewer"
+    )
 
     st.caption(
-        "Automated PostgreSQL query review with "
-        "deterministic rules and local AI."
+        "Автоматический анализ PostgreSQL-запросов: "
+        "риски, качество SQL, план выполнения и AI-разбор."
     )
 
     reviewer_tab, history_tab = st.tabs(
-        ["Reviewer", "History"]
+        [
+            "Проверка SQL",
+            "История проверок",
+        ]
     )
 
     with reviewer_tab:

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 
 def is_safe_select(sql: str) -> bool:
-    """Allow only one plain SELECT statement."""
+    """Разрешает EXPLAIN только для одного SELECT-запроса."""
 
     if not sql or not sql.strip():
         return False
@@ -15,11 +15,11 @@ def is_safe_select(sql: str) -> bool:
     if cleaned_sql.endswith(";"):
         cleaned_sql = cleaned_sql[:-1].strip()
 
-    # Reject multiple statements.
+    # Несколько SQL-команд запрещены.
     if ";" in cleaned_sql:
         return False
 
-    # For the MVP, EXPLAIN only plain SELECT queries.
+    # Для EXPLAIN разрешаем только SELECT.
     if not re.match(
         r"^\s*SELECT\b",
         cleaned_sql,
@@ -54,12 +54,15 @@ def explain_query(
     db: Session,
     sql: str,
 ) -> dict:
-    """Run PostgreSQL EXPLAIN without running EXPLAIN ANALYZE."""
+    """Получает план PostgreSQL EXPLAIN без EXPLAIN ANALYZE."""
 
     if not is_safe_select(sql):
         return {
             "available": False,
-            "reason": "EXPLAIN is available only for a single safe SELECT.",
+            "reason": (
+                "EXPLAIN доступен только для одного "
+                "безопасного SELECT-запроса."
+            ),
             "plan": [],
         }
 
@@ -71,11 +74,15 @@ def explain_query(
         )
 
         db.execute(
-            text("SET LOCAL statement_timeout = '2000ms'")
+            text(
+                "SET LOCAL statement_timeout = '2000ms'"
+            )
         )
 
         result = db.execute(
-            text(f"EXPLAIN {cleaned_sql}")
+            text(
+                f"EXPLAIN {cleaned_sql}"
+            )
         )
 
         plan = [
@@ -96,6 +103,9 @@ def explain_query(
 
         return {
             "available": False,
-            "reason": str(exc),
+            "reason": (
+                "Не удалось получить план выполнения PostgreSQL. "
+                f"Техническая причина: {exc}"
+            ),
             "plan": [],
         }

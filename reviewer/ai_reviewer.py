@@ -6,57 +6,177 @@ from ollama import chat
 MODEL_NAME = "qwen2.5-coder:3b"
 
 
+SQLFLUFF_RULE_INFO = {
+    "LT01": (
+        "Нарушено рекомендуемое форматирование пробелов."
+    ),
+    "LT09": (
+        "При выборе нескольких столбцов рекомендуется "
+        "размещать элементы SELECT на отдельных строках."
+    ),
+    "LT12": (
+        "SQLFluff ожидает один перенос строки в конце SQL."
+    ),
+    "LT13": (
+        "SQL не должен начинаться с пустой строки "
+        "или лишних пробелов."
+    ),
+    "AL01": (
+        "Стиль объявления псевдонимов таблиц не соответствует "
+        "выбранной политике SQLFluff. Это не означает, "
+        "что псевдонимы отсутствуют."
+    ),
+    "AM04": (
+        "Запрос возвращает заранее неопределённое количество "
+        "столбцов, например при использовании SELECT *."
+    ),
+    "AM05": (
+        "Тип JOIN записан недостаточно явно согласно "
+        "правилам SQLFluff."
+    ),
+    "ST09": (
+        "Рекомендуется изменить порядок ссылок на таблицы "
+        "в условии JOIN для единообразия структуры SQL."
+    ),
+    "PRS": (
+        "SQLFluff не смог разобрать часть SQL-запроса. "
+        "Возможна синтаксическая ошибка."
+    ),
+}
+
+
 SYSTEM_PROMPT = (
-    "You are an expert PostgreSQL SQL reviewer.\n\n"
+    "Ты эксперт по PostgreSQL и SQL-review.\n\n"
 
-    "Your task is to explain SQL problems using evidence from "
-    "deterministic custom rules and SQLFluff.\n\n"
+    "Отвечай только на русском языке. "
+    "Английский допускается только внутри SQL-кода, "
+    "в названиях PostgreSQL, SQLFluff, Ollama, "
+    "таблиц, столбцов, функций и кодов правил.\n\n"
 
-    "The deterministic findings are the source of truth. "
-    "Do not claim that a reported finding has been fixed unless "
-    "the suggested SQL actually removes that exact problem.\n\n"
+    "Ты являешься объясняющим компонентом системы. "
+    "Фактические результаты уже получены детерминированными "
+    "правилами приложения и SQLFluff.\n\n"
 
-    "Analyze:\n"
-    "- correctness\n"
-    "- data safety\n"
-    "- performance risks\n"
-    "- readability\n"
-    "- PostgreSQL best practices\n\n"
+    "Не проводи повторный независимый аудит с нуля. "
+    "Объясняй переданные результаты и формируй практические рекомендации.\n\n"
 
-    "Important constraints:\n"
-    "- Never invent database columns, indexes, constraints, or schema details.\n"
-    "- If the original query uses SELECT *, do not guess which columns "
-    "should replace it.\n"
-    "- A leading wildcard such as LIKE '%text%' remains a leading wildcard "
-    "unless the pattern itself is changed.\n"
-    "- LOWER(column), UPPER(column), DATE(column), and similar expressions "
-    "remain functions on a filtered column unless the expression is removed.\n"
-    "- Do not claim that a normal index solves a leading wildcard search.\n"
-    "- Do not change query semantics just to remove a warning.\n"
-    "- If a safe rewrite requires missing schema or business context, "
-    "do not invent a rewrite.\n\n"
+    "Наши правила отвечают за известные приложению риски: "
+    "опасные операции, риск потери данных и некоторые "
+    "проблемы производительности.\n\n"
 
-    "Before writing the final answer, compare Suggested SQL with every "
-    "custom finding. If a finding remains in the suggested query, explicitly "
-    "state that it remains unresolved.\n\n"
+    "SQLFluff отвечает за синтаксис, структуру, "
+    "неоднозначность, стиль и форматирование SQL.\n\n"
 
-    "Return these sections:\n"
-    "1. Summary\n"
-    "2. Main risks\n"
-    "3. Recommendations\n"
-    "4. Suggested SQL\n\n"
+    "Не называй запрос безопасным, полностью безопасным "
+    "или соответствующим стандартам безопасности.\n\n"
 
-    "If a safe equivalent rewrite cannot be produced, write exactly:\n"
-    "Suggested SQL: No safe rewrite without additional context."
+    "Если наши правила не обнаружили нарушений, используй формулировку: "
+    "'Детерминированные правила приложения не обнаружили "
+    "известных им рисков.'\n\n"
+
+    "Замечания SQLFluff по стилю и форматированию "
+    "не являются рисками безопасности.\n\n"
+
+    "Не придумывай таблицы, столбцы, индексы, ограничения, "
+    "отношения между таблицами или бизнес-логику.\n\n"
+
+    "Не заявляй о SQL-инъекции без фактических оснований.\n"
+    "Не заявляй о существовании индекса, если это неизвестно.\n\n"
+
+    "Не меняй смысл исходного SQL.\n"
+    "Не добавляй новые таблицы, столбцы, JOIN, WHERE "
+    "или другие условия.\n\n"
+
+    "Если исходный запрос содержит SELECT *, не угадывай, "
+    "какие именно столбцы нужно выбрать вместо него.\n\n"
+
+    "Предлагать изменённый SQL можно только тогда, когда "
+    "исправления очевидны и не меняют семантику запроса: "
+    "например, форматирование, стиль алиасов или явная форма "
+    "уже существующего JOIN.\n\n"
+
+    "Если сохранение смысла нельзя гарантировать, "
+    "не переписывай SQL.\n\n"
+
+    "Ответ должен содержать РОВНО три раздела:\n"
+    "### Итог\n"
+    "### Рекомендации\n"
+    "### Предлагаемый SQL\n\n"
+
+    "Не создавай отдельные разделы 'Риски', 'SQLFluff', "
+    "'Качество SQL' или другие дополнительные разделы.\n\n"
+
+    "В разделе 'Итог' кратко объясни три оценки приложения "
+    "и общий результат анализа.\n\n"
+
+    "В разделе 'Рекомендации' собери найденные проблемы "
+    "в понятный приоритетный список. "
+    "Не нужно повторять технический отчёт SQLFluff построчно, "
+    "потому что пользователь уже видит его отдельно.\n\n"
+
+    "В разделе 'Предлагаемый SQL' покажи один итоговый вариант "
+    "только если его можно изменить без смены смысла.\n\n"
+
+    "Если безопасное переписывание невозможно, напиши:\n"
+    "Безопасный вариант нельзя предложить без дополнительного контекста.\n\n"
+
+    "Пиши кратко, конкретно и без повторов."
 )
+
+
+def prepare_sqlfluff_for_ai(
+    sqlfluff_findings: list[dict],
+) -> list[dict]:
+    """
+    Передаёт AI только необходимые данные SQLFluff
+    и русское описание правила.
+
+    Исходные английские description намеренно удаляются,
+    чтобы модель не копировала их в ответ.
+    """
+
+    prepared = []
+
+    for finding in sqlfluff_findings:
+        code = finding.get("code", "UNKNOWN")
+
+        russian_description = SQLFLUFF_RULE_INFO.get(
+            code,
+            (
+                f"SQLFluff обнаружил нарушение правила {code}, "
+                "относящееся к качеству или структуре SQL."
+            ),
+        )
+
+        prepared.append(
+            {
+                "code": code,
+                "line": finding.get("line"),
+                "position": finding.get("position"),
+                "quality_penalty": finding.get(
+                    "quality_penalty",
+                    0,
+                ),
+                "description_ru": russian_description,
+            }
+        )
+
+    return prepared
 
 
 def build_ai_prompt(
     sql: str,
     custom_findings: list[dict],
     sqlfluff_findings: list[dict],
+    risk_score: float,
+    quality_score: float,
+    overall_score: float,
 ) -> str:
-    """Build a grounded prompt for the local LLM."""
+    """Формирует компактный контекст для Ollama."""
+
+    prepared_sqlfluff = prepare_sqlfluff_for_ai(
+        sqlfluff_findings
+    )
 
     custom_json = json.dumps(
         custom_findings,
@@ -65,23 +185,43 @@ def build_ai_prompt(
     )
 
     sqlfluff_json = json.dumps(
-        sqlfluff_findings,
+        prepared_sqlfluff,
         indent=2,
         ensure_ascii=False,
     )
 
     return (
-        "Review the following PostgreSQL query.\n\n"
-        "SQL:\n"
+        "Сформируй итоговый человекочитаемый разбор "
+        "следующего PostgreSQL-запроса.\n\n"
+
+        "Исходный SQL:\n"
         "```sql\n"
         f"{sql}\n"
         "```\n\n"
-        "Custom rule findings:\n"
+
+        "Оценки уже рассчитаны приложением. "
+        "Не пересчитывай и не изменяй их:\n"
+        f"- Оценка рисков: {risk_score}/10\n"
+        f"- Качество SQL: {quality_score}/10\n"
+        f"- Итоговая оценка: {overall_score}/10\n\n"
+
+        "Нарушения детерминированных правил:\n"
         f"{custom_json}\n\n"
-        "SQLFluff findings:\n"
+
+        "Замечания SQLFluff:\n"
         f"{sqlfluff_json}\n\n"
-        "Explain the important problems and propose a safer or cleaner "
-        "query when appropriate."
+
+        "В итоговом тексте не копируй технический отчёт "
+        "SQLFluff полностью. Пользователь уже видит его отдельно.\n\n"
+
+        "Сформулируй общий вывод и объедини похожие замечания "
+        "в практические рекомендации.\n\n"
+
+        "Не называй SQL безопасным только потому, что "
+        "custom_findings пуст.\n\n"
+
+        "Если предлагаешь SQL, сохрани те же таблицы, "
+        "столбцы, соединения, фильтры и смысл исходного запроса."
     )
 
 
@@ -89,24 +229,40 @@ def get_ai_review(
     sql: str,
     custom_findings: list[dict],
     sqlfluff_findings: list[dict],
+    risk_score: float,
+    quality_score: float,
+    overall_score: float,
 ) -> str:
-    """Generate an AI-assisted SQL review using Ollama."""
-    if not custom_findings and not sqlfluff_findings:
+    """Формирует AI-разбор через локальную Ollama."""
+
+    if (
+        not custom_findings
+        and not sqlfluff_findings
+    ):
         return (
-            "### Summary\n"
-            "No issues were detected by the deterministic custom rules "
-            "or SQLFluff.\n\n"
-            "### Main risks\n"
-            "No verified risks were detected from the available information.\n\n"
-            "### Recommendations\n"
-            "No changes are required based on the current static analysis.\n\n"
-            "### Suggested SQL\n"
-            "No rewrite required."
+            "### Итог\n"
+            f"**Оценка рисков:** {risk_score}/10  \n"
+            f"**Качество SQL:** {quality_score}/10  \n"
+            f"**Итоговая оценка:** {overall_score}/10\n\n"
+            "Детерминированные правила приложения не обнаружили "
+            "известных им рисков, а SQLFluff не выявил замечаний "
+            "по качеству запроса.\n\n"
+
+            "### Рекомендации\n"
+            "На основании выполненного анализа изменений "
+            "не требуется.\n\n"
+
+            "### Предлагаемый SQL\n"
+            "Переписывать запрос не требуется."
         )
+
     prompt = build_ai_prompt(
         sql=sql,
         custom_findings=custom_findings,
         sqlfluff_findings=sqlfluff_findings,
+        risk_score=risk_score,
+        quality_score=quality_score,
+        overall_score=overall_score,
     )
 
     response = chat(

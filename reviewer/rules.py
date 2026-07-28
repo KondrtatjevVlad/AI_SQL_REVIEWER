@@ -32,8 +32,11 @@ def check_select_star(statement: str) -> list[Finding]:
             Finding(
                 code="SELECT_STAR",
                 severity="WARNING",
-                title="SELECT * detected",
-                message="Explicitly list the required columns instead of SELECT *.",
+                title="Обнаружен SELECT *",
+                message=(
+                    "Рекомендуется явно перечислить необходимые столбцы "
+                    "вместо использования SELECT *."
+                ),
                 penalty=1,
             )
         ]
@@ -43,15 +46,26 @@ def check_select_star(statement: str) -> list[Finding]:
 
 def check_delete_without_where(statement: str) -> list[Finding]:
     if (
-        re.match(r"^\s*DELETE\s+FROM\b", statement, re.IGNORECASE)
-        and not re.search(r"\bWHERE\b", statement, re.IGNORECASE)
+        re.match(
+            r"^\s*DELETE\s+FROM\b",
+            statement,
+            re.IGNORECASE,
+        )
+        and not re.search(
+            r"\bWHERE\b",
+            statement,
+            re.IGNORECASE,
+        )
     ):
         return [
             Finding(
                 code="DELETE_WITHOUT_WHERE",
                 severity="CRITICAL",
-                title="DELETE without WHERE",
-                message="DELETE without WHERE may remove all rows from the table.",
+                title="DELETE без WHERE",
+                message=(
+                    "DELETE без условия WHERE может удалить "
+                    "все строки таблицы."
+                ),
                 penalty=4,
             )
         ]
@@ -61,15 +75,26 @@ def check_delete_without_where(statement: str) -> list[Finding]:
 
 def check_update_without_where(statement: str) -> list[Finding]:
     if (
-        re.match(r"^\s*UPDATE\b", statement, re.IGNORECASE)
-        and not re.search(r"\bWHERE\b", statement, re.IGNORECASE)
+        re.match(
+            r"^\s*UPDATE\b",
+            statement,
+            re.IGNORECASE,
+        )
+        and not re.search(
+            r"\bWHERE\b",
+            statement,
+            re.IGNORECASE,
+        )
     ):
         return [
             Finding(
                 code="UPDATE_WITHOUT_WHERE",
                 severity="CRITICAL",
-                title="UPDATE without WHERE",
-                message="UPDATE without WHERE may modify all rows in the table.",
+                title="UPDATE без WHERE",
+                message=(
+                    "UPDATE без условия WHERE может изменить "
+                    "все строки таблицы."
+                ),
                 penalty=4,
             )
         ]
@@ -78,13 +103,20 @@ def check_update_without_where(statement: str) -> list[Finding]:
 
 
 def check_leading_wildcard(statement: str) -> list[Finding]:
-    if re.search(r"\b(?:LIKE|ILIKE)\s+'%", statement, re.IGNORECASE):
+    if re.search(
+        r"\b(?:LIKE|ILIKE)\s+'%",
+        statement,
+        re.IGNORECASE,
+    ):
         return [
             Finding(
                 code="LEADING_WILDCARD",
                 severity="WARNING",
-                title="Leading wildcard in LIKE",
-                message="A pattern starting with % may make index usage inefficient.",
+                title="Шаблон LIKE начинается с %",
+                message=(
+                    "Шаблон поиска, начинающийся с %, может привести "
+                    "к неэффективному использованию индексов."
+                ),
                 penalty=2,
             )
         ]
@@ -94,7 +126,11 @@ def check_leading_wildcard(statement: str) -> list[Finding]:
 
 def check_many_joins(statement: str) -> list[Finding]:
     join_count = len(
-        re.findall(r"\bJOIN\b", statement, re.IGNORECASE)
+        re.findall(
+            r"\bJOIN\b",
+            statement,
+            re.IGNORECASE,
+        )
     )
 
     if join_count >= 4:
@@ -102,8 +138,12 @@ def check_many_joins(statement: str) -> list[Finding]:
             Finding(
                 code="MANY_JOINS",
                 severity="WARNING",
-                title="Large number of JOINs",
-                message=f"The statement contains {join_count} JOIN operations.",
+                title="Большое количество JOIN",
+                message=(
+                    f"Запрос содержит {join_count} операций JOIN. "
+                    "Стоит проверить сложность запроса и необходимость "
+                    "каждого соединения."
+                ),
                 penalty=1,
             )
         ]
@@ -132,8 +172,12 @@ def check_function_in_where(statement: str) -> list[Finding]:
             Finding(
                 code="FUNCTION_IN_WHERE",
                 severity="WARNING",
-                title="Function applied to filtered column",
-                message="A function on a WHERE column may reduce normal index efficiency.",
+                title="Функция применяется к столбцу в WHERE",
+                message=(
+                    "Применение функции к фильтруемому столбцу "
+                    "может снизить эффективность использования "
+                    "обычного индекса."
+                ),
                 penalty=1,
             )
         ]
@@ -142,24 +186,37 @@ def check_function_in_where(statement: str) -> list[Finding]:
 
 
 def check_dangerous_ddl(statement: str) -> list[Finding]:
-    if re.match(r"^\s*DROP\s+", statement, re.IGNORECASE):
+    if re.match(
+        r"^\s*DROP\s+",
+        statement,
+        re.IGNORECASE,
+    ):
         return [
             Finding(
                 code="DROP_STATEMENT",
                 severity="CRITICAL",
-                title="DROP statement detected",
-                message="DROP permanently removes a database object.",
+                title="Обнаружена команда DROP",
+                message=(
+                    "DROP удаляет объект базы данных. "
+                    "Такая операция потенциально необратима."
+                ),
                 penalty=4,
             )
         ]
 
-    if re.match(r"^\s*TRUNCATE\b", statement, re.IGNORECASE):
+    if re.match(
+        r"^\s*TRUNCATE\b",
+        statement,
+        re.IGNORECASE,
+    ):
         return [
             Finding(
                 code="TRUNCATE_STATEMENT",
                 severity="CRITICAL",
-                title="TRUNCATE statement detected",
-                message="TRUNCATE removes all rows from a table.",
+                title="Обнаружена команда TRUNCATE",
+                message=(
+                    "TRUNCATE удаляет все строки таблицы."
+                ),
                 penalty=4,
             )
         ]
@@ -180,13 +237,17 @@ RULES = [
 
 def run_custom_rules(sql: str) -> dict:
     if not sql or not sql.strip():
-        raise ValueError("SQL query cannot be empty.")
+        raise ValueError(
+            "SQL-запрос не может быть пустым."
+        )
 
     findings: list[Finding] = []
 
     for statement in split_statements(sql):
         for rule in RULES:
-            findings.extend(rule(statement))
+            findings.extend(
+                rule(statement)
+            )
 
     total_penalty = sum(
         finding.penalty
@@ -194,7 +255,10 @@ def run_custom_rules(sql: str) -> dict:
     )
 
     return {
-        "score": max(0, 10 - total_penalty),
+        "score": max(
+            0,
+            10 - total_penalty,
+        ),
         "findings": [
             finding.to_dict()
             for finding in findings
