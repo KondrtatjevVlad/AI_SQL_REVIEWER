@@ -91,7 +91,18 @@ def get_ai_review(
     sqlfluff_findings: list[dict],
 ) -> str:
     """Generate an AI-assisted SQL review using Ollama."""
-
+    if not custom_findings and not sqlfluff_findings:
+        return (
+            "### Summary\n"
+            "No issues were detected by the deterministic custom rules "
+            "or SQLFluff.\n\n"
+            "### Main risks\n"
+            "No verified risks were detected from the available information.\n\n"
+            "### Recommendations\n"
+            "No changes are required based on the current static analysis.\n\n"
+            "### Suggested SQL\n"
+            "No rewrite required."
+        )
     prompt = build_ai_prompt(
         sql=sql,
         custom_findings=custom_findings,
