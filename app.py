@@ -378,7 +378,7 @@ def show_reviewer() -> None:
 
     include_ai = st.checkbox(
         "Выполнить AI-разбор с помощью Ollama",
-        value=True,
+        value=False,
     )
 
     include_explain = st.checkbox(
@@ -405,6 +405,24 @@ def show_reviewer() -> None:
             "Введите SQL-запрос."
         )
         return
+
+    # Плашка показывает пользователю, что кнопка сработала.
+    # Никаких spinner, emoji и анимаций здесь нет.
+    status_placeholder = st.empty()
+
+    if include_ai:
+        status_placeholder.info(
+            "Выполняется анализ SQL и AI-разбор Ollama. "
+            "Это может занять некоторое время..."
+        )
+    elif include_explain:
+        status_placeholder.info(
+            "Выполняется анализ SQL и PostgreSQL EXPLAIN..."
+        )
+    else:
+        status_placeholder.info(
+            "Выполняется анализ SQL..."
+        )
 
     try:
         analysis_db = SessionLocal()
@@ -435,11 +453,15 @@ def show_reviewer() -> None:
             history_db.close()
 
     except Exception as exc:
+        status_placeholder.empty()
+
         st.error(
             "Не удалось выполнить анализ SQL. "
             f"Техническая причина: {exc}"
         )
         return
+
+    status_placeholder.empty()
 
     st.divider()
 

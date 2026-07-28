@@ -1,228 +1,551 @@
 import json
+import os
+import re
 
-from ollama import chat
+import sqlfluff
+from ollama import Client
+
+from reviewer.linter import lint_sql
+from reviewer.rules import run_custom_rules
+from reviewer.scoring import calculate_overall_score, calculate_quality_score
 
 
 MODEL_NAME = "qwen2.5-coder:3b"
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
+MAX_AI_ATTEMPTS = 3
+MAX_SQLFLUFF_FIX_PASSES = 3
 
 SQLFLUFF_RULE_INFO = {
-    "LT01": (
-        "Нарушено рекомендуемое форматирование пробелов."
+    "LT01": "Исправить пробелы и форматирование.",
+    "LT09": "Разместить элементы SELECT на отдельных строках.",
+    "LT12": "Корректно завершить SQL переносом строки.",
+    "LT13": "Убрать лишние пробелы в начале SQL.",
+    "AL01": "Привести стиль псевдонимов к требованиям SQLFluff.",
+    "AM04": "SELECT * требует явного списка столбцов.",
+    "AM05": "Сделать тип существующего JOIN явным.",
+    "ST09": "Исправить порядок ссылок в условии JOIN.",
+    "PRS": "Исправить синтаксическую ошибку.",
+}
+
+NO_ALT_REASONS = {
+    "SELECT_STAR": (
+        "Нельзя корректно заменить SELECT * без знания того, "
+        "какие именно столбцы должны возвращаться."
     ),
-    "LT09": (
-        "При выборе нескольких столбцов рекомендуется "
-        "размещать элементы SELECT на отдельных строках."
+    "MANY_JOINS": (
+        "Нельзя автоматически удалить или заменить JOIN без знания "
+        "связей и бизнес-смысла запроса."
     ),
-    "LT12": (
-        "SQLFluff ожидает один перенос строки в конце SQL."
+    "DELETE_WITHOUT_WHERE": (
+        "Нельзя придумывать WHERE для DELETE без знания того, "
+        "какие строки требуется удалить."
     ),
-    "LT13": (
-        "SQL не должен начинаться с пустой строки "
-        "или лишних пробелов."
+    "UPDATE_WITHOUT_WHERE": (
+        "Нельзя придумывать WHERE для UPDATE без знания того, "
+        "какие строки требуется изменить."
     ),
-    "AL01": (
-        "Стиль объявления псевдонимов таблиц не соответствует "
-        "выбранной политике SQLFluff. Это не означает, "
-        "что псевдонимы отсутствуют."
+    "DROP": (
+        "DROP нельзя автоматически заменить другой операцией "
+        "без знания намерения пользователя."
     ),
-    "AM04": (
-        "Запрос возвращает заранее неопределённое количество "
-        "столбцов, например при использовании SELECT *."
-    ),
-    "AM05": (
-        "Тип JOIN записан недостаточно явно согласно "
-        "правилам SQLFluff."
-    ),
-    "ST09": (
-        "Рекомендуется изменить порядок ссылок на таблицы "
-        "в условии JOIN для единообразия структуры SQL."
-    ),
-    "PRS": (
-        "SQLFluff не смог разобрать часть SQL-запроса. "
-        "Возможна синтаксическая ошибка."
+    "TRUNCATE": (
+        "TRUNCATE нельзя автоматически заменить другой операцией "
+        "без знания намерения пользователя."
     ),
 }
 
+FIX_SYSTEM_PROMPT = (
+    "Ты эксперт по PostgreSQL.\n\n"
+    "Исправь только очевидную синтаксическую ошибку в SQL.\n"
+    "Сохрани таблицы, столбцы, значения, числа, фильтры и смысл запроса.\n"
+    "Не придумывай новые таблицы, столбцы, WHERE, JOIN или значения.\n"
+    "Верни только один полный SQL в блоке ```sql ... ```."
+)
 
-SYSTEM_PROMPT = (
-    "Ты эксперт по PostgreSQL и SQL-review.\n\n"
+SUMMARY_SYSTEM_PROMPT = (
+    "Ты эксперт по PostgreSQL. Ответь только на русском языке.\n"
+    "Кратко объясни, что изменилось между исходным и рекомендуемым SQL.\n"
+    "Не пересчитывай оценки, не придумывай новые проблемы и "
+    "не предлагай другой SQL. Максимум четыре коротких предложения."
+)
 
-    "Отвечай только на русском языке. "
-    "Английский допускается только внутри SQL-кода, "
-    "в названиях PostgreSQL, SQLFluff, Ollama, "
-    "таблиц, столбцов, функций и кодов правил.\n\n"
+CASE_FUNCTION_LIKE_PATTERN = re.compile(
+    r"\b(?:LOWER|UPPER)\s*\(\s*"
+    r"(?P<column>(?:\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\.(?:\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_]*))?)\s*\)"
+    r"\s*(?:LIKE|ILIKE)\s*"
+    r"(?P<literal>'(?:''|[^'])*')",
+    re.IGNORECASE,
+)
 
-    "Ты являешься объясняющим компонентом системы. "
-    "Фактические результаты уже получены детерминированными "
-    "правилами приложения и SQLFluff.\n\n"
-
-    "Не проводи повторный независимый аудит с нуля. "
-    "Объясняй переданные результаты и формируй практические рекомендации.\n\n"
-
-    "Наши правила отвечают за известные приложению риски: "
-    "опасные операции, риск потери данных и некоторые "
-    "проблемы производительности.\n\n"
-
-    "SQLFluff отвечает за синтаксис, структуру, "
-    "неоднозначность, стиль и форматирование SQL.\n\n"
-
-    "Не называй запрос безопасным, полностью безопасным "
-    "или соответствующим стандартам безопасности.\n\n"
-
-    "Если наши правила не обнаружили нарушений, используй формулировку: "
-    "'Детерминированные правила приложения не обнаружили "
-    "известных им рисков.'\n\n"
-
-    "Замечания SQLFluff по стилю и форматированию "
-    "не являются рисками безопасности.\n\n"
-
-    "Не придумывай таблицы, столбцы, индексы, ограничения, "
-    "отношения между таблицами или бизнес-логику.\n\n"
-
-    "Не заявляй о SQL-инъекции без фактических оснований.\n"
-    "Не заявляй о существовании индекса, если это неизвестно.\n\n"
-
-    "Не меняй смысл исходного SQL.\n"
-    "Не добавляй новые таблицы, столбцы, JOIN, WHERE "
-    "или другие условия.\n\n"
-
-    "Если исходный запрос содержит SELECT *, не угадывай, "
-    "какие именно столбцы нужно выбрать вместо него.\n\n"
-
-    "Предлагать изменённый SQL можно только тогда, когда "
-    "исправления очевидны и не меняют семантику запроса: "
-    "например, форматирование, стиль алиасов или явная форма "
-    "уже существующего JOIN.\n\n"
-
-    "Если сохранение смысла нельзя гарантировать, "
-    "не переписывай SQL.\n\n"
-
-    "Ответ должен содержать РОВНО три раздела:\n"
-    "### Итог\n"
-    "### Рекомендации\n"
-    "### Предлагаемый SQL\n\n"
-
-    "Не создавай отдельные разделы 'Риски', 'SQLFluff', "
-    "'Качество SQL' или другие дополнительные разделы.\n\n"
-
-    "В разделе 'Итог' кратко объясни три оценки приложения "
-    "и общий результат анализа.\n\n"
-
-    "В разделе 'Рекомендации' собери найденные проблемы "
-    "в понятный приоритетный список. "
-    "Не нужно повторять технический отчёт SQLFluff построчно, "
-    "потому что пользователь уже видит его отдельно.\n\n"
-
-    "В разделе 'Предлагаемый SQL' покажи один итоговый вариант "
-    "только если его можно изменить без смены смысла.\n\n"
-
-    "Если безопасное переписывание невозможно, напиши:\n"
-    "Безопасный вариант нельзя предложить без дополнительного контекста.\n\n"
-
-    "Пиши кратко, конкретно и без повторов."
+LIKE_LITERAL_PATTERN = re.compile(
+    r"\b(?P<operator>LIKE|ILIKE)\s*(?P<literal>'(?:''|[^'])*')",
+    re.IGNORECASE,
 )
 
 
-def prepare_sqlfluff_for_ai(
-    sqlfluff_findings: list[dict],
-) -> list[dict]:
-    """
-    Передаёт AI только необходимые данные SQLFluff
-    и русское описание правила.
+def analyze_candidate_sql(sql: str) -> dict:
+    custom = run_custom_rules(sql)
+    raw_lint = lint_sql(sql)
+    quality = calculate_quality_score(raw_lint)
+    sqlfluff_findings = quality["findings"]
+    overall = calculate_overall_score(
+        risk_score=custom["score"],
+        quality_score=quality["score"],
+        custom_findings=custom["findings"],
+        sqlfluff_findings=sqlfluff_findings,
+    )
+    return {
+        "risk_score": custom["score"],
+        "quality_score": quality["score"],
+        "overall_score": overall,
+        "custom_findings": custom["findings"],
+        "sqlfluff_findings": sqlfluff_findings,
+    }
 
-    Исходные английские description намеренно удаляются,
-    чтобы модель не копировала их в ответ.
-    """
 
-    prepared = []
+def get_codes(findings: list[dict]) -> set[str]:
+    return {f.get("code") for f in findings if f.get("code")}
 
-    for finding in sqlfluff_findings:
+
+def get_remaining_codes(analysis: dict) -> list[str]:
+    result = []
+    for finding in analysis["custom_findings"] + analysis["sqlfluff_findings"]:
+        code = finding.get("code")
+        if code and code not in result:
+            result.append(code)
+    return result
+
+
+def is_perfect(analysis: dict) -> bool:
+    return (
+        analysis["risk_score"] == 10
+        and analysis["quality_score"] == 10
+        and analysis["overall_score"] == 10
+        and not analysis["custom_findings"]
+        and not analysis["sqlfluff_findings"]
+    )
+
+
+def rank(analysis: dict) -> tuple:
+    count = len(analysis["custom_findings"]) + len(analysis["sqlfluff_findings"])
+    return (
+        analysis["overall_score"],
+        analysis["quality_score"],
+        analysis["risk_score"],
+        -count,
+    )
+
+
+def has_prs(analysis: dict) -> bool:
+    return "PRS" in get_codes(analysis["sqlfluff_findings"])
+
+
+def apply_safe_custom_fixes(sql: str) -> str:
+    def replace(match: re.Match) -> str:
+        return f"{match.group('column')} ILIKE {match.group('literal')}"
+
+    return CASE_FUNCTION_LIKE_PATTERN.sub(replace, sql)
+
+
+def sqlfluff_autofix(sql: str) -> str:
+    current = sql.strip()
+    if not current or has_prs(analyze_candidate_sql(current)):
+        return current
+
+    for _ in range(MAX_SQLFLUFF_FIX_PASSES):
+        try:
+            fixed = sqlfluff.fix(
+                current.rstrip() + "\n",
+                dialect="postgres",
+                fix_even_unparsable=False,
+            ).strip()
+        except Exception:
+            return current
+
+        if not fixed or fixed == current:
+            break
+
+        current = fixed
+        analysis = analyze_candidate_sql(current)
+
+        if not analysis["sqlfluff_findings"] or has_prs(analysis):
+            break
+
+    return current
+
+
+def run_safe_fix_pipeline(sql: str) -> str:
+    result = sqlfluff_autofix(sql)
+    result = apply_safe_custom_fixes(result)
+    result = sqlfluff_autofix(result)
+    return result.strip()
+
+
+def extract_sql_from_ai(text: str) -> str | None:
+    match = re.search(r"```sql\s*(.*?)```", text, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
+def prepare_sqlfluff_findings(findings: list[dict]) -> list[dict]:
+    result = []
+    for finding in findings:
         code = finding.get("code", "UNKNOWN")
-
-        russian_description = SQLFLUFF_RULE_INFO.get(
-            code,
-            (
-                f"SQLFluff обнаружил нарушение правила {code}, "
-                "относящееся к качеству или структуре SQL."
-            ),
-        )
-
-        prepared.append(
+        result.append(
             {
                 "code": code,
                 "line": finding.get("line"),
                 "position": finding.get("position"),
-                "quality_penalty": finding.get(
-                    "quality_penalty",
-                    0,
+                "description_ru": SQLFLUFF_RULE_INFO.get(
+                    code,
+                    f"Исправить нарушение SQLFluff {code}.",
                 ),
-                "description_ru": russian_description,
+            }
+        )
+    return result
+
+
+def try_ai_syntax_fix(
+    client: Client,
+    sql: str,
+    analysis: dict,
+) -> tuple[str, dict]:
+    best_sql = sql
+    best_analysis = analysis
+
+    for _ in range(MAX_AI_ATTEMPTS):
+        prompt = (
+            "Исправь синтаксис следующего PostgreSQL-запроса.\n\n"
+            "```sql\n"
+            f"{best_sql}\n"
+            "```\n\n"
+            "Ошибки SQLFluff:\n"
+            f"{json.dumps(prepare_sqlfluff_findings(best_analysis['sqlfluff_findings']), ensure_ascii=False)}"
+        )
+
+        response = client.chat(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": FIX_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        )
+
+        ai_sql = extract_sql_from_ai(response.message.content)
+        if not ai_sql:
+            break
+
+        candidate_sql = run_safe_fix_pipeline(ai_sql)
+        candidate_analysis = analyze_candidate_sql(candidate_sql)
+
+        if rank(candidate_analysis) > rank(best_analysis):
+            best_sql = candidate_sql
+            best_analysis = candidate_analysis
+
+        if not has_prs(candidate_analysis):
+            break
+
+    return best_sql, best_analysis
+
+
+def transform_leading_wildcard(sql: str, mode: str) -> str:
+    def replace(match: re.Match) -> str:
+        operator = match.group("operator")
+        literal = match.group("literal")
+        content = literal[1:-1]
+
+        if not content.startswith("%"):
+            return match.group(0)
+
+        without_leading = content.lstrip("%")
+
+        if mode == "prefix":
+            new_content = without_leading
+        elif mode == "exact":
+            stripped = without_leading.rstrip("%")
+            if "%" in stripped or "_" in stripped:
+                return match.group(0)
+            new_content = stripped
+        else:
+            return match.group(0)
+
+        return f"{operator} '{new_content}'"
+
+    return LIKE_LITERAL_PATTERN.sub(replace, sql)
+
+
+def generate_alternative_candidates(sql: str, analysis: dict) -> list[dict]:
+    """
+    Универсальная точка расширения.
+
+    Для каждого правила, для которого можно сформировать осмысленный
+    компромиссный SQL-вариант, здесь добавляется стратегия.
+    """
+    codes = get_codes(analysis["custom_findings"])
+    candidates = []
+
+    if "LEADING_WILDCARD" in codes:
+        prefix_sql = transform_leading_wildcard(sql, "prefix")
+        if prefix_sql != sql:
+            candidates.append(
+                {
+                    "title": "Поиск только с начала строки",
+                    "sql": prefix_sql,
+                    "warning": (
+                        "Изменяет смысл поиска: совпадение будет искаться "
+                        "только с начала значения."
+                    ),
+                }
+            )
+
+        exact_sql = transform_leading_wildcard(sql, "exact")
+        if exact_sql not in {sql, prefix_sql}:
+            candidates.append(
+                {
+                    "title": "Точное совпадение",
+                    "sql": exact_sql,
+                    "warning": (
+                        "Сильнее изменяет смысл: wildcard удаляется, "
+                        "поэтому условие перестаёт искать подстроку."
+                    ),
+                }
+            )
+
+    return candidates
+
+
+def score_alternatives(
+    safe_sql: str,
+    safe_analysis: dict,
+) -> tuple[list[dict], list[str]]:
+    scored = []
+    seen = {safe_sql.strip()}
+
+    for candidate in generate_alternative_candidates(safe_sql, safe_analysis):
+        candidate_sql = run_safe_fix_pipeline(candidate["sql"])
+        normalized = candidate_sql.strip()
+
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+
+        candidate_analysis = analyze_candidate_sql(candidate_sql)
+
+        if rank(candidate_analysis) <= rank(safe_analysis):
+            continue
+
+        scored.append(
+            {
+                **candidate,
+                "sql": candidate_sql,
+                "analysis": candidate_analysis,
             }
         )
 
-    return prepared
+    scored.sort(key=lambda item: rank(item["analysis"]), reverse=True)
+
+    reasons = []
+    for code in sorted(get_codes(safe_analysis["custom_findings"])):
+        reason = NO_ALT_REASONS.get(code)
+        if reason:
+            reasons.append(f"{code}: {reason}")
+
+    return scored, reasons
 
 
-def build_ai_prompt(
-    sql: str,
-    custom_findings: list[dict],
-    sqlfluff_findings: list[dict],
-    risk_score: float,
-    quality_score: float,
-    overall_score: float,
+def build_recommendations(
+    original_analysis: dict,
+    safe_analysis: dict,
 ) -> str:
-    """Формирует компактный контекст для Ollama."""
-
-    prepared_sqlfluff = prepare_sqlfluff_for_ai(
-        sqlfluff_findings
+    original_codes = (
+        get_codes(original_analysis["custom_findings"])
+        | get_codes(original_analysis["sqlfluff_findings"])
     )
-
-    custom_json = json.dumps(
-        custom_findings,
-        indent=2,
-        ensure_ascii=False,
+    final_codes = (
+        get_codes(safe_analysis["custom_findings"])
+        | get_codes(safe_analysis["sqlfluff_findings"])
     )
+    fixed = original_codes - final_codes
 
-    sqlfluff_json = json.dumps(
-        prepared_sqlfluff,
-        indent=2,
-        ensure_ascii=False,
-    )
+    lines = []
 
-    return (
-        "Сформируй итоговый человекочитаемый разбор "
-        "следующего PostgreSQL-запроса.\n\n"
+    if fixed:
+        lines.append("Автоматически исправлены: " + ", ".join(sorted(fixed)) + ".")
 
+    if "FUNCTION_IN_WHERE" in fixed:
+        lines.append(
+            "LOWER/UPPER перед LIKE заменён на ILIKE без изменения шаблона поиска."
+        )
+
+    if "LEADING_WILDCARD" in final_codes:
+        lines.append(
+            "Ведущий % сохранён в рекомендуемом варианте, "
+            "потому что его удаление меняет смысл поиска."
+        )
+
+    if "SELECT_STAR" in final_codes or "AM04" in final_codes:
+        lines.append(
+            "SELECT * не заменяется неизвестными столбцами без информации о схеме."
+        )
+
+    if "MANY_JOINS" in final_codes:
+        lines.append(
+            "JOIN не удаляются автоматически, потому что это может изменить результат."
+        )
+
+    if "DELETE_WITHOUT_WHERE" in final_codes:
+        lines.append(
+            "WHERE для DELETE нельзя придумывать без знания нужных строк."
+        )
+
+    if "UPDATE_WITHOUT_WHERE" in final_codes:
+        lines.append(
+            "WHERE для UPDATE нельзя придумывать без знания нужных строк."
+        )
+
+    if "PRS" in final_codes:
+        lines.append(
+            "Синтаксическую ошибку не удалось исправить однозначно."
+        )
+
+    if not final_codes:
+        lines.append("Все обнаруженные нарушения устранены.")
+
+    if not lines:
+        lines.append(
+            "Запрос улучшен настолько, насколько это можно сделать "
+            "без изменения его смысла."
+        )
+
+    return "\n\n".join(f"- {line}" for line in lines)
+
+
+def get_ai_summary(
+    client: Client,
+    original_sql: str,
+    safe_sql: str,
+    original_analysis: dict,
+    safe_analysis: dict,
+) -> str | None:
+    prompt = (
         "Исходный SQL:\n"
         "```sql\n"
-        f"{sql}\n"
+        f"{original_sql}\n"
         "```\n\n"
-
-        "Оценки уже рассчитаны приложением. "
-        "Не пересчитывай и не изменяй их:\n"
-        f"- Оценка рисков: {risk_score}/10\n"
-        f"- Качество SQL: {quality_score}/10\n"
-        f"- Итоговая оценка: {overall_score}/10\n\n"
-
-        "Нарушения детерминированных правил:\n"
-        f"{custom_json}\n\n"
-
-        "Замечания SQLFluff:\n"
-        f"{sqlfluff_json}\n\n"
-
-        "В итоговом тексте не копируй технический отчёт "
-        "SQLFluff полностью. Пользователь уже видит его отдельно.\n\n"
-
-        "Сформулируй общий вывод и объедини похожие замечания "
-        "в практические рекомендации.\n\n"
-
-        "Не называй SQL безопасным только потому, что "
-        "custom_findings пуст.\n\n"
-
-        "Если предлагаешь SQL, сохрани те же таблицы, "
-        "столбцы, соединения, фильтры и смысл исходного запроса."
+        "Рекомендуемый SQL:\n"
+        "```sql\n"
+        f"{safe_sql}\n"
+        "```\n\n"
+        f"Исходные нарушения: {get_remaining_codes(original_analysis)}\n"
+        f"Оставшиеся нарушения: {get_remaining_codes(safe_analysis)}"
     )
+
+    try:
+        response = client.chat(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        text = response.message.content.strip()
+        return text or None
+    except Exception:
+        return None
+
+
+def score_block(analysis: dict) -> str:
+    return (
+        f"**Оценка рисков:** {analysis['risk_score']}/10  \n"
+        f"**Качество SQL:** {analysis['quality_score']}/10  \n"
+        f"**Итоговая оценка:** {analysis['overall_score']}/10"
+    )
+
+
+def alternatives_report(
+    alternatives: list[dict],
+    unavailable_reasons: list[str],
+) -> str:
+    result = "### Альтернативные варианты\n\n"
+
+    if not alternatives:
+        result += (
+            "Дополнительных SQL-вариантов, которые можно корректно "
+            "сформировать и автоматически проверить, не найдено."
+        )
+
+    for index, item in enumerate(alternatives, start=1):
+        analysis = item["analysis"]
+        result += (
+            f"\n\n#### Вариант {index} — {item['title']}\n\n"
+            f"⚠️ {item['warning']}\n\n"
+            "```sql\n"
+            f"{item['sql'].strip()}\n"
+            "```\n\n"
+            f"{score_block(analysis)}"
+        )
+
+        if is_perfect(analysis):
+            result += (
+                "\n\nЭтот вариант получил 10/10 по текущим "
+                "автоматическим правилам приложения."
+            )
+        else:
+            remaining = get_remaining_codes(analysis)
+            if remaining:
+                result += "\n\nОстались нарушения: " + ", ".join(remaining) + "."
+
+    if unavailable_reasons:
+        result += "\n\n#### Где альтернативу нельзя построить автоматически\n\n"
+        result += "\n".join(f"- {reason}" for reason in unavailable_reasons)
+
+    return result
+
+
+def build_report(
+    original_analysis: dict,
+    safe_sql: str,
+    safe_analysis: dict,
+    ai_summary: str | None,
+    alternatives: list[dict],
+    unavailable_reasons: list[str],
+) -> str:
+    result = (
+        "### Итог исходного запроса\n\n"
+        f"{score_block(original_analysis)}\n\n"
+        "### Что удалось улучшить\n\n"
+        f"{build_recommendations(original_analysis, safe_analysis)}\n\n"
+    )
+
+    if ai_summary:
+        result += f"### Комментарий Ollama\n\n{ai_summary}\n\n"
+
+    result += (
+        "### Рекомендуемый SQL — смысл сохранён\n\n"
+        "```sql\n"
+        f"{safe_sql.strip()}\n"
+        "```\n\n"
+        "### Проверка рекомендуемого SQL\n\n"
+        f"{score_block(safe_analysis)}\n\n"
+    )
+
+    if is_perfect(safe_analysis):
+        result += "Рекомендуемый SQL прошёл Custom Rules и SQLFluff без нарушений."
+    else:
+        remaining = get_remaining_codes(safe_analysis)
+        result += (
+            "Это максимальное автоматическое улучшение "
+            "без намеренного изменения смысла запроса."
+        )
+        if remaining:
+            result += "\n\n**Остались нарушения:** " + ", ".join(remaining) + "."
+
+    result += "\n\n" + alternatives_report(alternatives, unavailable_reasons)
+    return result
 
 
 def get_ai_review(
@@ -233,50 +556,45 @@ def get_ai_review(
     quality_score: float,
     overall_score: float,
 ) -> str:
-    """Формирует AI-разбор через локальную Ollama."""
+    original_sql = sql.strip()
 
-    if (
-        not custom_findings
-        and not sqlfluff_findings
-    ):
-        return (
-            "### Итог\n"
-            f"**Оценка рисков:** {risk_score}/10  \n"
-            f"**Качество SQL:** {quality_score}/10  \n"
-            f"**Итоговая оценка:** {overall_score}/10\n\n"
-            "Детерминированные правила приложения не обнаружили "
-            "известных им рисков, а SQLFluff не выявил замечаний "
-            "по качеству запроса.\n\n"
+    original_analysis = {
+        "risk_score": risk_score,
+        "quality_score": quality_score,
+        "overall_score": overall_score,
+        "custom_findings": custom_findings,
+        "sqlfluff_findings": sqlfluff_findings,
+    }
 
-            "### Рекомендации\n"
-            "На основании выполненного анализа изменений "
-            "не требуется.\n\n"
+    client = Client(host=OLLAMA_HOST)
 
-            "### Предлагаемый SQL\n"
-            "Переписывать запрос не требуется."
-        )
+    safe_sql = run_safe_fix_pipeline(original_sql)
+    safe_analysis = analyze_candidate_sql(safe_sql)
 
-    prompt = build_ai_prompt(
-        sql=sql,
-        custom_findings=custom_findings,
-        sqlfluff_findings=sqlfluff_findings,
-        risk_score=risk_score,
-        quality_score=quality_score,
-        overall_score=overall_score,
+    if has_prs(safe_analysis):
+        ai_sql, ai_analysis = try_ai_syntax_fix(client, safe_sql, safe_analysis)
+        if rank(ai_analysis) > rank(safe_analysis):
+            safe_sql = ai_sql
+            safe_analysis = ai_analysis
+
+    alternatives, unavailable_reasons = score_alternatives(
+        safe_sql,
+        safe_analysis,
     )
 
-    response = chat(
-        model=MODEL_NAME,
-        messages=[
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
+    ai_summary = get_ai_summary(
+        client,
+        original_sql,
+        safe_sql,
+        original_analysis,
+        safe_analysis,
     )
 
-    return response.message.content.strip()
+    return build_report(
+        original_analysis,
+        safe_sql,
+        safe_analysis,
+        ai_summary,
+        alternatives,
+        unavailable_reasons,
+    )
