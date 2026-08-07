@@ -6,11 +6,11 @@ import sqlfluff
 from ollama import Client
 
 from reviewer.linter import lint_sql
+from reviewer.model_registry import DEFAULT_MODEL_KEY, get_model
 from reviewer.rules import run_custom_rules
 from reviewer.scoring import calculate_overall_score, calculate_quality_score
 
 
-MODEL_NAME = "qwen2.5-coder:3b"
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 MAX_AI_ATTEMPTS = 3
@@ -211,6 +211,7 @@ def prepare_sqlfluff_findings(findings: list[dict]) -> list[dict]:
 
 def try_ai_syntax_fix(
     client: Client,
+    model_name: str,
     sql: str,
     analysis: dict,
 ) -> tuple[str, dict]:
@@ -228,11 +229,13 @@ def try_ai_syntax_fix(
         )
 
         response = client.chat(
-            model=MODEL_NAME,
+            model=model_name,
             messages=[
                 {"role": "system", "content": FIX_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
+            options={"temperature": 0},
+            keep_alive="2m",
         )
 
         ai_sql = extract_sql_from_ai(response.message.content)
@@ -426,6 +429,7 @@ def build_recommendations(
 
 def get_ai_summary(
     client: Client,
+    model_name: str,
     original_sql: str,
     safe_sql: str,
     original_analysis: dict,
@@ -446,11 +450,13 @@ def get_ai_summary(
 
     try:
         response = client.chat(
-            model=MODEL_NAME,
+            model=model_name,
             messages=[
                 {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
+            options={"temperature": 0},
+            keep_alive=0,
         )
         text = response.message.content.strip()
         return text or None
@@ -507,6 +513,7 @@ def alternatives_report(
 
 
 def build_report(
+    model_display_name: str,
     original_analysis: dict,
     safe_sql: str,
     safe_analysis: dict,
@@ -515,6 +522,7 @@ def build_report(
     unavailable_reasons: list[str],
 ) -> str:
     result = (
+        f"## AI-разбор — {model_display_name}\n\n"
         "### Итог исходного запроса\n\n"
         f"{score_block(original_analysis)}\n\n"
         "### Что удалось улучшить\n\n"
@@ -522,7 +530,7 @@ def build_report(
     )
 
     if ai_summary:
-        result += f"### Комментарий Ollama\n\n{ai_summary}\n\n"
+        result += f"### Комментарий модели\n\n{ai_summary}\n\n"
 
     result += (
         "### Рекомендуемый SQL — смысл сохранён\n\n"
@@ -555,6 +563,7 @@ def get_ai_review(
     risk_score: float,
     quality_score: float,
     overall_score: float,
+    model_key: str = DEFAULT_MODEL_KEY,
 ) -> str:
     original_sql = sql.strip()
 
@@ -566,13 +575,19 @@ def get_ai_review(
         "sqlfluff_findings": sqlfluff_findings,
     }
 
+    model = get_model(model_key)
     client = Client(host=OLLAMA_HOST)
 
     safe_sql = run_safe_fix_pipeline(original_sql)
     safe_analysis = analyze_candidate_sql(safe_sql)
 
     if has_prs(safe_analysis):
-        ai_sql, ai_analysis = try_ai_syntax_fix(client, safe_sql, safe_analysis)
+        ai_sql, ai_analysis = try_ai_syntax_fix(
+            client,
+            model.ollama_name,
+            safe_sql,
+            safe_analysis,
+        )
         if rank(ai_analysis) > rank(safe_analysis):
             safe_sql = ai_sql
             safe_analysis = ai_analysis
@@ -584,6 +599,7 @@ def get_ai_review(
 
     ai_summary = get_ai_summary(
         client,
+        model.ollama_name,
         original_sql,
         safe_sql,
         original_analysis,
@@ -591,6 +607,7 @@ def get_ai_review(
     )
 
     return build_report(
+        model.display_name,
         original_analysis,
         safe_sql,
         safe_analysis,
